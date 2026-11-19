@@ -4,7 +4,7 @@ from uuid import uuid4
 from contextlib import aclosing
 
 from .store import DomainError
-from .upstream import UpstreamError
+from .upstream import UpstreamError, frame_failure
 from .maintenance_proxy import resolve_maintenance_proxy
 
 
@@ -121,22 +121,47 @@ class MaintenanceWorker:
                         raise UpstreamError("unconfirmed_checkin")
                     await commit_receipt(self.store.finish, job["id"], job["owner"], job["attempt"], True)
                 elif job["kind"] == "verify":
-                    answered, ended = False, False
+                    answered, ended, finish_deadline = False, False, None
                     messages = [{"role": "user", "content": "Reply with OK."}]
                     if job["platform"] in {"WorkBuddy 国内", "WorkBuddy 国际"}:
                         # This is our own recovery probe, not client history.
                         # WorkBuddy's official probe contract requires system first.
                         messages.insert(0, {"role": "system", "content": "You are a helpful assistant."})
                     async with aclosing(adapter.chat({"model": job["model"], "messages": messages, "max_tokens": 16, "stream": True}, "verify-" + job["id"])) as stream:
-                        async for frame in stream:
+                        while True:
+                            # Some adapters report finish_reason before the tail.
+                            # Bound the tail wait, but never ignore an explicit error.
+                            timeout = asyncio.timeout_at(finish_deadline)
+                            try:
+                                async with timeout:
+                                    frame = await anext(stream)
+                            except StopAsyncIteration:
+                                break
+                            except TimeoutError:
+                                if not timeout.expired():
+                                    raise
+                                break
+                            failure = frame_failure(frame)
+                            if failure:
+                                raise failure
                             if frame.get("_done"):
                                 ended = True
-                            for choice in frame.get("choices") or []:
-                                text = (choice.get("delta") or {}).get("content")
-                                answered |= isinstance(text, str) and bool(text.strip())
-                                ended |= bool(choice.get("finish_reason"))
-                            if ended:
                                 break
+                            choices = frame.get("choices") or []
+                            if not isinstance(choices, list) or any(not isinstance(choice, dict) for choice in choices):
+                                raise UpstreamError("invalid_stream_frame")
+                            for choice in choices:
+                                delta = choice.get("delta") or {}
+                                if not isinstance(delta, dict):
+                                    raise UpstreamError("invalid_stream_frame")
+                                text = delta.get("content")
+                                answered |= isinstance(text, str) and bool(text.strip())
+                                finish = choice.get("finish_reason")
+                                if finish == "content_filter":
+                                    raise UpstreamError("content_filter", 400)
+                                if isinstance(finish, str) and finish.strip() and not ended:
+                                    ended = True
+                                    finish_deadline = asyncio.get_running_loop().time() + 1
                     if not ended:
                         raise UpstreamError("truncated_stream", 502, True)
                     if not answered:

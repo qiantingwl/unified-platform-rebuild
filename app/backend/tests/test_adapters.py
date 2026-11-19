@@ -48,7 +48,8 @@ def test_wps_usage_preserves_explicit_cache_evidence_across_frames(cached):
             if cached is not None:
                 usage["prompt_tokens_details"] = {"cached_tokens": cached}
             yield {"choices": [{"text": "answer"}], "usage": usage}
-            yield {"choices": [{"finish_reason": "stop"}], "usage": {"completion_tokens": 5}}
+            yield {"choices": [{"finish_reason": "stop"}]}
+            yield {"choices": [], "usage": {"completion_tokens": 5}}
 
     async def run():
         adapter = WPS(Stream(), {}, "a")
@@ -62,6 +63,30 @@ def test_wps_usage_preserves_explicit_cache_evidence_across_frames(cached):
         assert usage == {"prompt_tokens": 100, "completion_tokens": 5, "total_tokens": 105,
                          **({"prompt_tokens_details": {"cached_tokens": cached}} if cached is not None else {})}
         assert output[-1] == {"_done": True}
+
+    asyncio.run(run())
+
+
+def test_wps_error_after_finish_is_not_a_success():
+    class Stream:
+        async def sse(self, *args):
+            yield {"choices": [{"text": "answer"}]}
+            yield {"choices": [{"finish_reason": "stop"}]}
+            yield {"result": "UserUnauthorized"}
+
+    async def run():
+        adapter = WPS(Stream(), {}, "a")
+
+        async def prepare(*args):
+            return "https://example.invalid", {}, {}
+
+        adapter.prepare = prepare
+        received = []
+        with pytest.raises(UpstreamError, match="invalid_credentials"):
+            async for frame in adapter.chat({"model": "m"}, "s"):
+                received.append(frame)
+        assert received[0]["choices"][0]["delta"]["content"] == "answer"
+        assert not any(frame.get("_done") or frame["choices"][0]["finish_reason"] for frame in received)
 
     asyncio.run(run())
 

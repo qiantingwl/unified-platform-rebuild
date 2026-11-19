@@ -9,8 +9,11 @@ from test_gateway import real_accounts,FakeRegistry,delta
 @pytest.mark.parametrize('flow,code',[
     ([delta('answer')],'truncated_stream'),
     ([{'_done':True}],'no_effective_output'),
+    ([delta('answer'), {'choices':[{'finish_reason':'stop'}]}, {'error':{'type':'server_error'}}], 'upstream_5xx'),
+    ([delta('answer'), {'_done':True,'error':{'code':'ModelPermissionDenied'}}], 'permission'),
+    ([{'choices':[{'delta':{'content':'partial'},'finish_reason':'content_filter'}]}], 'content_filter'),
 ])
-def test_model_review_does_not_call_transport_failure_permission(tmp_path,flow,code):
+def test_model_review_requires_completed_text_and_no_stream_error(tmp_path,flow,code):
     store=Store(f'sqlite:///{tmp_path/"worker.db"}',Fernet.generate_key())
     try:
         real_accounts(store,1)
