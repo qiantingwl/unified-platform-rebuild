@@ -63,7 +63,7 @@ def classify(status=200, business=None, retry_after=0, message=None):
         return UpstreamError("account_disabled", 403, True)
     if code in {"UserIdentityNotVerified", "40331"}:
         return UpstreamError("identity", 403, True)
-    if status == 401 or code in {"020002", "100002", "200001", "200003", "-107", "-101", "12153"}:
+    if status == 401 or code in {"UserUnauthorized", "020002", "100002", "200001", "200003", "-107", "-101", "12153"}:
         return UpstreamError("invalid_credentials", 401, True)
     if status == 402 or code.lower() in {"insufficient_points", "insufficient_quota", "insufficient_balance", "quota_exceeded", "no_quota", "insufficientquota", "insufficientbalance"}:
         return UpstreamError("quota", 402, True)

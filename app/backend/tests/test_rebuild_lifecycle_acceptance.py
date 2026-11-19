@@ -135,15 +135,14 @@ def test_seven_platform_official_modes_and_import_is_not_independence(env, platf
         assert record_native_login(store,s,a,"verified_import",credential)["state"] == "verification_required"
 
 
-def test_reused_refresh_and_shared_import_remain_protected(env):
+def test_import_and_reused_refresh_require_independent_session_evidence(env):
     store, _ = env
     c = {"access_token":"old","refresh_token":"shared"}
     aid = account(store,"小浣熊",c)
     with store.tx() as (s,_):
         a=s.get(Account,aid)
-        s.add(Resource(id=uid(),kind="migration_source",name=aid,data=json.dumps({"credential_owner":"legacy"}),updated_at=store.clock()))
-        s.flush()
-        assert control(s,a)["state"]=="blocked_shared_session"
+        assert control(s,a)["state"]=="verification_required"
+        assert control(s,a)["reason"]=="session_evidence_required"
         a.credential_version=2
         value=record_native_login(store,s,a,"official",{"access_token":"new","refresh_token":"shared"},1)
         assert value["state"]=="verification_required" and value["reason"]=="official_login_reused_session_material"

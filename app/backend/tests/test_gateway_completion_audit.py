@@ -50,6 +50,24 @@ def test_structured_stream_error_changes_account_before_content(store):
     assert any(b['reason']=='quota' and b['model']=='model' and b['verified_at'] is None for b in failed['model_blocks'])
 
 
+def test_retry_does_not_publish_failed_attempt_usage_or_cache(store):
+    registry = FakeRegistry([
+        [{"usage": {"prompt_tokens": 100, "prompt_tokens_details": {"cached_tokens": 90}}},
+         {"_done": True, "error": {"type": "server_error"}}],
+        [{"usage": {"prompt_tokens": 50}}, delta("OK"),
+         {"usage": {"completion_tokens": 0}}, {"_done": True}],
+    ])
+    result = execute(store, registry)
+    assert len(set(registry.calls)) == 2
+    assert result[0]["placeholder"] and result[1] == {"delta": {"content": "OK"}}
+    assert [event["usage"] for event in result if "usage" in event] == [
+        {"prompt_tokens": 50}, {"prompt_tokens": 50, "completion_tokens": 0},
+    ]
+    assert result[-1] == {"finish": "stop"}
+    record = store.snapshot()["requests"][0]
+    assert record["input_tokens"] == 50 and record["cached_tokens"] is None
+
+
 def test_structured_stream_error_after_content_does_not_retry(store):
     registry = FakeRegistry([[delta("partial"), {"error": {"type": "server_error"}}]])
     result = execute(store, registry)
@@ -205,7 +223,12 @@ def test_wps_tool_schema_uses_official_reference_expansion():
     asyncio.run(run())
 
 
-@pytest.mark.parametrize("frame,code", [({"error": {"code": "UserIdentityNotVerified"}}, "identity"), ({"code": "AuditFailed"}, "content_filter")])
+@pytest.mark.parametrize("frame,code", [
+    ({"error": {"code": "UserIdentityNotVerified"}}, "identity"),
+    ({"code": "AuditFailed"}, "content_filter"),
+    ({"result": "UserUnauthorized"}, "invalid_credentials"),
+    ({"error": {"code": "UserUnauthorized"}}, "invalid_credentials"),
+])
 def test_wps_nested_errors_and_moderation_are_not_empty_responses(frame, code):
     async def run():
         cache = {("a", 1, "m", "s"): {"created": __import__('time').time(), "session_id": "sid", "run_id": "rid"}}

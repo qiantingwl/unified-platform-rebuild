@@ -128,11 +128,10 @@ def test_permanent_validation_failure_is_not_repeated_automatically(store):
     assert store.claim("worker") is None
 
 
-def test_shared_session_blocks_automatic_and_manual_renew(store):
+def test_unverified_session_blocks_automatic_and_manual_renew(store):
     aid = account(store)
     store.real_capabilities["Loomy"].add("renew")
     store.put_credential(aid, json.dumps({"expires_at": store.clock() - 1, "session": "synthetic"}), 1)
-    store.resource_put("migration_source", aid, {"credential_owner": "legacy"})
     supervisor = Supervisor(store, SimpleNamespace(capacity=8), SimpleNamespace(), ".")
     supervisor.schedule({**DEFAULT_SETTINGS, "auto_renew": True})
     with store.read() as (db, _):

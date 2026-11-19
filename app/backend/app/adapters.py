@@ -799,6 +799,7 @@ class WPS(Adapter):
         url, headers, outgoing = await self.prepare(body, session)
         translator = wps_protocol.FrameTranslator(body["model"])
         finish_deadline = None
+        reported_usage = {}
         async with aclosing(self.t.sse(url, headers, encode(outgoing))) as frames:
             while True:
                 try:
@@ -835,20 +836,29 @@ class WPS(Adapter):
                         if line.startswith("data: ") and line[6:] != "[DONE]":
                             yield json.loads(line[6:])
                 raw_usage = frame.get("usage")
-                if isinstance(raw_usage, dict) and raw_usage:
-                    # Keep the official field mapping but distinguish absent
-                    # counters from an explicitly reported zero.
-                    if "cached_tokens" not in raw_usage and "cached_tokens" not in (raw_usage.get("prompt_tokens_details") or {}):
-                        translator.usage.pop("prompt_tokens_details", None)
-                    for key in ("prompt_tokens", "completion_tokens"):
-                        if key not in raw_usage:
-                            translator.usage.pop(key, None)
-                    if "prompt_tokens" not in raw_usage or "completion_tokens" not in raw_usage:
-                        translator.usage.pop("total_tokens", None)
+                if isinstance(raw_usage, dict):
+                    for name, detail in (("prompt_tokens", None), ("completion_tokens", None),
+                                         ("cached_tokens", "prompt_tokens_details"),
+                                         ("reasoning_tokens", "completion_tokens_details")):
+                        nested = raw_usage.get(detail)
+                        value = raw_usage.get(name, nested.get(name) if isinstance(nested, dict) else None)
+                        # Usage snapshots can arrive in different frames. Only
+                        # a reported counter, including explicit zero, updates it.
+                        if isinstance(value, str) and value.isascii() and value.isdigit() and len(value) <= 18:
+                            value = int(value)
+                        if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+                            reported_usage[name] = value
                 if translator.finished and finish_deadline is None:
                     finish_deadline = time.monotonic() + 1
         if not translator.finished:
             raise UpstreamError("truncated_stream", 502, True)
+        translator.usage = {name: reported_usage[name] for name in ("prompt_tokens", "completion_tokens") if name in reported_usage}
+        if len(translator.usage) == 2:
+            translator.usage["total_tokens"] = sum(translator.usage.values())
+        for counter, detail in (("cached_tokens", "prompt_tokens_details"),
+                                ("reasoning_tokens", "completion_tokens_details")):
+            if counter in reported_usage:
+                translator.usage[detail] = {counter: reported_usage[counter]}
         for raw in translator.tail():
             for line in raw.decode().splitlines():
                 if line.startswith("data: ") and line[6:] != "[DONE]":

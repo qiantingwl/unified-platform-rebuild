@@ -39,27 +39,26 @@ def test_expiry_shapes_are_normalized_without_network(credential,expected):
     assert credential_expiry(credential)==expected
 
 
-def test_legacy_owned_and_future_credentials_not_renewed_and_due_work_deduplicated(tmp_path):
+def test_unverified_and_future_credentials_not_renewed_and_due_work_deduplicated(tmp_path):
     now=1794900000.
     store=Store(f"sqlite:///{tmp_path/'expiry.db'}",Fernet.generate_key(),clock=lambda:now)
     store.real_capabilities["小浣熊"]={"renew","balance"}
     try:
         ids={}
         for label,credential in {
-            "alias":{"expiresAt":(now+60)*1000},
+            "alias":{"access_token":"test-alias-token","expiresAt":(now+60)*1000},
             "jwt":{"access_token":jwt(now+60)},
-            "future":{"tokenExpiresAt":now+3600},
-            "legacy":{"expiresAt":now+60},
+            "future":{"access_token":"test-future-token","tokenExpiresAt":now+3600},
+            "unverified":{"access_token":"test-imported-token","expiresAt":now+60},
         }.items():
             aid=store.create_account("小浣熊",label,label)
             store.put_credential(aid,json.dumps(credential),0)
             with store.tx() as (s,_):
                 account=s.get(Account,aid)
                 account.credential_status="valid"
-                if label!='legacy':
-                    record_native_login(store,s,account,'official',credential)
+                if label!='unverified':
+                    assert record_native_login(store,s,account,'official',credential)['state']=='independent'
             ids[label]=aid
-        store.resource_put("migration_source",ids["legacy"],{"credential_owner":"legacy"})
         supervisor=Supervisor(store,SimpleNamespace(capacity=64),SimpleNamespace(),tmp_path)
         settings={**DEFAULT_SETTINGS,"auto_renew":True}
         supervisor.schedule(settings)

@@ -285,16 +285,16 @@ class Gateway:
                             if not first_frame:
                                 await self.mark_upstream_progress(attempt, 'first_frame_at')
                                 first_frame = True
-                            if frame.get("_done"):
-                                done = True
-                                break
                             failure = frame_failure(frame)
                             if failure:
                                 raise failure
-                            if isinstance(frame.get("usage"), dict):
+                            if frame.get("_done"):
+                                done = True
+                                break
+                            usage_updated = isinstance(frame.get("usage"), dict) and bool(frame["usage"])
+                            if usage_updated:
                                 merge_usage(attempt_usage, frame["usage"])
-                                await asyncio.to_thread(self.store.record_usage, request_id, attempt_usage)
-                                yield {"usage": dict(attempt_usage)}
+                            previously_started = started
                             choices = frame.get("choices") or []
                             if not isinstance(choices, list) or any(not isinstance(c, dict) for c in choices):
                                 raise UpstreamError("invalid_stream_frame")
@@ -318,6 +318,11 @@ class Gateway:
                                     finished = choice["finish_reason"]
                                     if finish_deadline is None:
                                         finish_deadline = time.monotonic() + self.usage_grace
+                            # Before output, usage belongs to a speculative attempt.
+                            # Never publish it if this request switches accounts.
+                            if started and attempt_usage and (usage_updated or not previously_started):
+                                await asyncio.to_thread(self.store.record_usage, request_id, attempt_usage)
+                                yield {"usage": dict(attempt_usage)}
                     if not started and finished == "content_filter":
                         # A moderation verdict is a result: another account would get the same.
                         status, error = "failed", "content_filter"

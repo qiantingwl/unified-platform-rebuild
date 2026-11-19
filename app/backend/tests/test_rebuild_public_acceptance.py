@@ -210,7 +210,6 @@ def test_metadata_backfill_preserves_business_and_never_invents_identity(tmp_pat
  with s.tx() as (db,state):
   a=s.account(db,'account-0002');a.original_label=None
   db.add(Credential(id=uid(),account_id=a.id,version=1,ciphertext=s.cipher.encrypt(json.dumps({'profile':{'displayName':'官方账户'}}).encode()).decode(),created_at=s.clock()))
-  db.add(Resource(id=uid(),kind='migration_source',name=a.id,data=json.dumps({'credential_owner':'legacy'}),updated_at=s.clock()))
  before=c.get('/api/accounts/account-0002').json()
  dry=backfill(s);assert dry['identity_updated']==1
  with s.read() as (db,_):assert db.get(Account,'account-0002').original_label is None
@@ -219,7 +218,7 @@ def test_metadata_backfill_preserves_business_and_never_invents_identity(tmp_pat
  assert after['original_label']=='官方账户' and after['enabled']==before['enabled'] and after['concurrency']==before['concurrency']
  with s.read() as (db,_):
   control=json.loads(db.scalar(select(Resource).where(Resource.kind=='lifecycle_control',Resource.name=='account-0002')).data)
-  assert control['state']=='blocked_shared_session'
+  assert control['state']=='verification_required' and control['reason']=='session_evidence_required'
  assert backfill(s,True)['identity_updated']==0
  s.engine.dispose()
 

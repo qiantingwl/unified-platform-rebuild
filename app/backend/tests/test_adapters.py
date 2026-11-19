@@ -40,6 +40,32 @@ def test_wps_checkin_is_readback_not_generic_200():
     asyncio.run(run())
 
 
+@pytest.mark.parametrize("cached", [None, 0, 80])
+def test_wps_usage_preserves_explicit_cache_evidence_across_frames(cached):
+    class Stream:
+        async def sse(self, *args):
+            usage = {"prompt_tokens": 100}
+            if cached is not None:
+                usage["prompt_tokens_details"] = {"cached_tokens": cached}
+            yield {"choices": [{"text": "answer"}], "usage": usage}
+            yield {"choices": [{"finish_reason": "stop"}], "usage": {"completion_tokens": 5}}
+
+    async def run():
+        adapter = WPS(Stream(), {}, "a")
+
+        async def prepare(*args):
+            return "https://example.invalid", {}, {}
+
+        adapter.prepare = prepare
+        output = [frame async for frame in adapter.chat({"model": "m"}, "s")]
+        usage = next(frame["usage"] for frame in output if "usage" in frame)
+        assert usage == {"prompt_tokens": 100, "completion_tokens": 5, "total_tokens": 105,
+                         **({"prompt_tokens_details": {"cached_tokens": cached}} if cached is not None else {})}
+        assert output[-1] == {"_done": True}
+
+    asyncio.run(run())
+
+
 def test_codearts_undated_old_claim_is_not_today():
     async def run():
         adapter = CodeArts(None,{},"a")

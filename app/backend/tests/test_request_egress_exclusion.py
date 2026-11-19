@@ -15,7 +15,9 @@ from test_gateway import FakeRegistry, delta, real_accounts
 
 @pytest.fixture
 def env(tmp_path):
-    store = Store(f"sqlite:///{tmp_path/'egress.db'}", Fernet.generate_key())
+    now = [1_794_900_000.0]
+    store = Store(f"sqlite:///{tmp_path/'egress.db'}", Fernet.generate_key(), clock=lambda: now[0])
+    store.test_clock = now
     token = real_accounts(store, 4)
     with store.read() as (s, _):
         ids = list(s.scalars(select(Account.id).order_by(Account.id)))
@@ -50,15 +52,23 @@ def test_connection_failure_skips_same_fixed_endpoint_without_rebinding(env, pha
         assert len(list(s.scalars(select(RequestAttempt)))) == 2
 
 
-def test_all_accounts_on_fixed_failed_connection_return_original_error_without_cross_request_ban(env):
+def test_failed_fixed_egress_returns_original_error_and_retries_after_transport_hold(env):
     store, token, ids, nodes, endpoints = env
     store.bind_proxy(ids[3], nodes[0])
     reg = FakeRegistry([[UpstreamError('network', 502, True, failure_phase='connect')]])
     result = run(store, token, reg)
     assert len(reg.calls) == 1 and result[-1]['error']['code'] == 'network'
-    # A new request still follows the fixed binding; it was never disabled.
+    original = store.resources('proxy_binding')
+    waiting = FakeRegistry([])
+    assert run(store, token, waiting)[-1]['error']['code'] == 'proxy_unavailable'
+    assert waiting.calls == []
+    assert store.resources('proxy_binding') == original
+    with store.read() as (s, _):
+        assert all(a.enabled for a in s.scalars(select(Account)))
+    store.test_clock[0] += 301
     next_reg = FakeRegistry([[delta('recovered'), {'_done': True}]])
     assert run(store, token, next_reg)[-1]['finish'] == 'stop'
+    assert store.resources('proxy_binding') == original
 
 
 @pytest.mark.parametrize('code,phase', [('upstream_5xx','http_status'), ('upstream_timeout','read'), ('network','read'), ('upstream_timeout','local_pool'), ('upstream_timeout','operation_timeout')])

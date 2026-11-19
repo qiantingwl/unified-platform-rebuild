@@ -11,7 +11,7 @@ from app.models import Account, Resource
 from app.registration import LoomyLogin, RegistrationService
 from app.registration_runner import BatchInput, RegistrationRunner
 from app.sms_channels import ChannelInput, SmsChannels
-from app.store import DomainError, Store, uid
+from app.store import DomainError, Store
 from app.upstream import UpstreamError
 from app.native_lifecycle import record_native_login
 
@@ -97,15 +97,14 @@ def test_relogin_scans_are_bounded_and_resume_after_skipped_accounts(env):
     assert set(seen) == {f"a{i:04}" for i in range(130)}
 
 
-def test_legacy_credential_owner_skips_automatic_but_allows_explicit_prepare(env):
+def test_unverified_import_skips_automatic_but_allows_explicit_prepare(env):
     store, service = env
     aid = store.create_account("Loomy", "synthetic", "synthetic")
     store.put_credential(aid, json.dumps({"session": "synthetic", "phone": "13800000001", "password": "synthetic"}), 0)
     with store.tx() as (s, _):
         s.get(Account, aid).credential_status = "invalid"
-        s.add(Resource(id=uid(), kind="migration_source", name=aid, data=json.dumps({"credential_owner": "legacy"}), updated_at=store.clock()))
     plan = service.recovery.plan(aid)
-    assert plan["lifecycle"]["state"] == "blocked_shared_session" and not plan["automatic_login_allowed"]
+    assert plan["lifecycle"]["state"] == "verification_required" and not plan["automatic_login_allowed"]
     RegistrationRunner(service, None).schedule_relogin()
     assert store.resources("registration") == []
     result = service.recovery.prepare(aid)
