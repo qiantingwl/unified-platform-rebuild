@@ -1,0 +1,11 @@
+# Isolated browser executor: Chromium, its system libraries and its processes live
+# only in this image. It has no database access and no encryption key.
+FROM python:3.12-slim
+ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 PLAYWRIGHT_BROWSERS_PATH=/opt/browsers
+WORKDIR /app
+COPY requirements-browser.txt ./
+RUN pip install --no-cache-dir -r requirements-browser.txt && python -m playwright install --with-deps chromium && useradd --create-home --uid 10002 browser
+COPY backend/browser_executor/ ./browser_executor/
+USER browser
+EXPOSE 4190
+CMD ["uvicorn", "browser_executor.main:create_app", "--factory", "--host", "0.0.0.0", "--port", "4190", "--no-access-log", "--timeout-graceful-shutdown", "20"]

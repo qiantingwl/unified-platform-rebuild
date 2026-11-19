@@ -1,0 +1,6 @@
+-r requirements.txt
+-r requirements-browser.txt
+# Offline tests on PostgreSQL: UNIFIED_TEST_POSTGRES=1 pytest
+pgserver==0.1.4
+pg8000==1.31.6
+pytest==9.2.0

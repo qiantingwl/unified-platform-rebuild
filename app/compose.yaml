@@ -1,0 +1,137 @@
+# Production stack, four containers:
+#   app      main program: console, management API, forwarding, account selection
+#   tasks    task service: registration, sign-in, balance, renewal, relogin, recovery, invitations
+#   browser  isolated headless browser executor, called by the task service
+#   db       PostgreSQL (internal network only)
+# Secrets come from .env next to this file (see .env.example). Only the app port is
+# published, on loopback, behind a TLS reverse proxy.
+#
+# Independent upgrades:
+#   docker compose build tasks && docker compose up -d --no-deps tasks   # forwarding keeps running
+#   docker compose build app   && docker compose up -d --no-deps app     # scheduled work keeps running
+name: unified-platform
+
+x-common-env: &common-env
+  UNIFIED_DATABASE_URL: "postgresql+psycopg://unified:${DB_PASSWORD:?Set DB_PASSWORD}@db:5432/unified"
+  UNIFIED_ENCRYPTION_KEY: "${UNIFIED_ENCRYPTION_KEY:?Set a Fernet key}"
+  UNIFIED_MAINTENANCE_CAPACITY: "${UNIFIED_MAINTENANCE_CAPACITY:-64}"
+  # 1 = normal operation; 0 = emergency stop for all upstream traffic.
+  UNIFIED_ENABLE_UPSTREAM: "${UNIFIED_ENABLE_UPSTREAM:-1}"
+  UNIFIED_BROWSER_URL: "http://browser:4190"
+  UNIFIED_BROWSER_TOKEN: "${BROWSER_EXECUTOR_TOKEN:?Set BROWSER_EXECUTOR_TOKEN}"
+
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: "20m"
+    max-file: "5"
+
+services:
+  app:
+    build:
+      context: .
+      target: api
+    image: unified-platform-app:${APP_VERSION:-0.3.0}
+    restart: unless-stopped
+    ports:
+      - "${UNIFIED_BIND_ADDRESS:-127.0.0.1}:${UNIFIED_PORT:-4180}:4180"
+    environment:
+      <<: *common-env
+      UNIFIED_ROLE: api
+      UNIFIED_PROXY_KERNEL_ENABLED: "1"
+      UNIFIED_PROXY_KERNEL_HOST: "app"
+      UNIFIED_MAX_REQUEST_BYTES: "${UNIFIED_MAX_REQUEST_BYTES:-33554432}"
+      UNIFIED_ADMIN_TOKEN: "${UNIFIED_ADMIN_TOKEN:?Set UNIFIED_ADMIN_TOKEN}"
+      UNIFIED_ADMIN_USERNAME: "${UNIFIED_ADMIN_USERNAME:-}"
+      UNIFIED_ADMIN_PASSWORD: "${UNIFIED_ADMIN_PASSWORD:-}"
+      UNIFIED_PUBLIC_ORIGIN: "${UNIFIED_PUBLIC_ORIGIN:?Set the public https origin}"
+      UNIFIED_SECURE_COOKIE: "${UNIFIED_SECURE_COOKIE:-1}"
+      # Direct IP:port deployments must not trust client-supplied proxy headers.
+      FORWARDED_ALLOW_IPS: "${FORWARDED_ALLOW_IPS:-127.0.0.1}"
+    init: true
+    networks: [internal]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:4180/api/health', timeout=3).close()"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    depends_on:
+      db:
+        condition: service_healthy
+    logging: *logging
+
+  tasks:
+    build:
+      context: .
+      target: tasks
+    image: unified-platform-tasks:${TASKS_VERSION:-0.3.0}
+    restart: unless-stopped
+    environment:
+      <<: *common-env
+      UNIFIED_ROLE: tasks
+    init: true
+    stop_grace_period: 75s
+    networks: [internal]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import json, urllib.request as u; assert json.load(u.urlopen('http://127.0.0.1:4180/api/health', timeout=3))['status'] == 'ok'"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    depends_on:
+      db:
+        condition: service_healthy
+      browser:
+        condition: service_started
+    logging: *logging
+
+  browser:
+    # Reachable only on the internal network; holds no database access or encryption key.
+    build:
+      context: .
+      dockerfile: Dockerfile.browser
+    image: unified-platform-browser:${BROWSER_VERSION:-0.3.0}
+    restart: unless-stopped
+    init: true
+    environment:
+      BROWSER_EXECUTOR_TOKEN: "${BROWSER_EXECUTOR_TOKEN:?Set BROWSER_EXECUTOR_TOKEN}"
+      BROWSER_MAX_SESSIONS: "${BROWSER_MAX_SESSIONS:-8}"
+      BROWSER_IDLE_SECONDS: "900"
+      BROWSER_OP_TIMEOUT: "60"
+    shm_size: "1gb"
+    mem_limit: "${BROWSER_MEM_LIMIT:-3g}"
+    cpus: "${BROWSER_CPUS:-2}"
+    pids_limit: 2048
+    networks: [internal]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import os, urllib.request as u; u.urlopen(u.Request('http://127.0.0.1:4190/health', headers={'Authorization': 'Bearer ' + os.environ['BROWSER_EXECUTOR_TOKEN']}), timeout=3).close()"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    logging: *logging
+
+  db:
+    image: postgres:17
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: unified
+      POSTGRES_USER: unified
+      POSTGRES_PASSWORD: "${DB_PASSWORD:?Set DB_PASSWORD}"
+    command: ["postgres", "-c", "max_connections=300", "-c", "shared_buffers=256MB"]
+    volumes:
+      - unified_database:/var/lib/postgresql/data
+    networks: [internal]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U unified -d unified"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    logging: *logging
+
+networks:
+  internal:
+
+volumes:
+  unified_database:
