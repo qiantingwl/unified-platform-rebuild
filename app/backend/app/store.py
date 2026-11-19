@@ -30,6 +30,7 @@ from .models import (
 PLATFORMS = ["Loomy", "小浣熊", "WPS 灵犀", "WorkBuddy 国内", "WorkBuddy 国际", "CodeArts", "Marvis"]
 PRIORITY = {"checkin": 10, "balance": 20, "onboarding": 25, "benefits": 26, "renew": 30, "relogin": 40, "verify": 50, "invitation": 60}
 ACCOUNT_FAILURES = {"no_sms", "invalid_credentials", "login_rejected"}
+REQUEST_LEASE_SECONDS = 180
 TEMPORARY_MODEL_BLOCKS = frozenset({"network", "rate_limit", "unknown_403"})
 ERROR_CODES = ACCOUNT_FAILURES | {"permission", "rate_limit", "network", "unknown_403", "executor_lost", "missing_material", "adapter_unavailable", "cancelled", "internal_error", "network_execution_disabled", "quota", "identity", "upstream_5xx", "upstream_timeout", "response_read_failed", "invalid_response", "invalid_balance", "unconfirmed_checkin", "iam_refresh_material_required", "identity_mismatch", "upstream_rejected"}
 ERROR_CODES |= {"identity_verifier_unavailable", "invalid_credential_format", "response_too_large", "frame_too_large", "invalid_stream_frame", "truncated_stream", "startup_timeout", "stream_idle", "empty_response", "unsupported_image_input", "unsupported_protocol_field", "prompt_too_large", "model_not_found", "unexpected_redirect"}
@@ -90,7 +91,7 @@ class Store:
             # Additive migration for existing installations, serialized by the
             # same PostgreSQL startup lock. Never recreate or empty the tables.
             columns = {c['name'] for c in inspect(connection).get_columns('request_logs')}
-            for name, sqltype in {'output_tokens':'INTEGER','total_tokens':'INTEGER','reasoning_tokens':'INTEGER','key_id':'VARCHAR(36)','route_version':'INTEGER','authorized_model':'VARCHAR(100)','client_source':'VARCHAR(40)'}.items():
+            for name, sqltype in {'output_tokens':'INTEGER','total_tokens':'INTEGER','reasoning_tokens':'INTEGER','key_id':'VARCHAR(36)','route_version':'INTEGER','authorized_model':'VARCHAR(100)','client_source':'VARCHAR(40)','retry_expires_at':'FLOAT'}.items():
                 if name not in columns:
                     connection.execute(text(f'ALTER TABLE request_logs ADD COLUMN {name} {sqltype}'))
             if 'finished_revision' not in {c['name'] for c in inspect(connection).get_columns('jobs')}:
@@ -1096,12 +1097,12 @@ class Store:
                 if reason != "ready":
                     continue
                 request_id, lease_id = request_id or uid(), uid()
-                s.add(Lease(id=lease_id, account_id=a.id, request_id=request_id, expires_at=now + 180))
+                s.add(Lease(id=lease_id, account_id=a.id, request_id=request_id, expires_at=now + REQUEST_LEASE_SECONDS))
                 log = s.get(RequestLog, request_id)
                 if log:
                     if log.status != "inflight" or log.first_content_at is not None or log.platform != key.platform or log.key_id != key.id or log.model != resolved_model:
                         raise DomainError("request_not_retryable")
-                    log.account_id = a.id
+                    log.account_id, log.retry_expires_at = a.id, None
                 else:
                     s.add(RequestLog(id=request_id, client_source=client_source, platform=a.platform, model=resolved_model, authorized_model=authorized_model, account_id=a.id, key_id=key.id, route_version=scope['version'], started_at=now))
                 attempt = RequestAttempt(id=uid(), request_id=request_id, account_id=a.id, credential_version=a.credential_version, started_at=now)
@@ -1136,8 +1137,28 @@ class Store:
                 if not lease or lease.expires_at>self.clock(): continue
                 if log.status=='inflight':
                     log.status,log.error_code,log.ended_at='failed','lease_expired',self.clock()
+                    log.retry_expires_at = None
                     self.emit(s,state,'request','lease_expired',log.account_id,request_id=log.id)
                 s.delete(lease)
+
+            # A failed attempt releases its account slot before admission of
+            # the next one. The API key still owns the inflight request. If
+            # the process died between those steps, no account lease remains
+            # to expire it. Check the durable gap deadline under the same lock.
+            gaps = list(s.scalars(select(RequestLog).where(
+                RequestLog.status == 'inflight', RequestLog.retry_expires_at.is_not(None),
+                RequestLog.retry_expires_at <= self.clock(),
+            ).order_by(RequestLog.retry_expires_at, RequestLog.id).limit(limit)
+              .with_for_update(skip_locked=True).execution_options(populate_existing=True)))
+            for log in gaps:
+                if s.scalar(select(Lease.id).where(Lease.request_id == log.id)):
+                    # Only a gap can expire here; active attempts are handled
+                    # by their own lease above (including mixed image revisions).
+                    log.retry_expires_at = None
+                    continue
+                log.status, log.error_code, log.ended_at = 'failed', 'lease_expired', self.clock()
+                log.retry_expires_at = None
+                self.emit(s, state, 'request', 'lease_expired', log.account_id, request_id=log.id)
 
     def mark_output(self, request_id, placeholder=False):
         with self.tx(scope=None) as (s, state):
@@ -1158,7 +1179,7 @@ class Store:
                 return
             if status == "succeeded" and r.first_content_at is None:
                 status, error = "failed", "no_effective_output"
-            r.status, r.ended_at = status, self.clock()
+            r.status, r.ended_at, r.retry_expires_at = status, self.clock(), None
             from .gateway import ERROR_CODES as GATEWAY_ERRORS
             r.error_code = error if error in GATEWAY_ERRORS else "internal_error" if error else None
             for attempt in s.scalars(select(RequestAttempt).where(RequestAttempt.request_id == request_id, RequestAttempt.ended_at.is_(None))):
@@ -1369,7 +1390,7 @@ class Store:
             lease = s.scalar(select(Lease).where(Lease.request_id == request_id))
             if not lease or lease.expires_at <= self.clock():
                 raise DomainError("request_lease_lost")
-            lease.expires_at = self.clock() + 180
+            lease.expires_at = self.clock() + REQUEST_LEASE_SECONDS
 
     def record_usage(self, request_id, usage):
         with self.tx(scope=None) as (s, state):
@@ -1391,11 +1412,12 @@ class Store:
 
     def fail_attempt(self, current, error):
         with self.tx(scope=None) as (s, state):
-            s.scalar(select(RequestLog).where(RequestLog.id == current["id"]).with_for_update())
+            log = s.scalar(select(RequestLog).where(RequestLog.id == current["id"]).with_for_update())
             attempt = s.get(RequestAttempt, current["attempt_id"])
-            if not attempt or attempt.ended_at is not None:
+            if not log or log.status != 'inflight' or not attempt or attempt.ended_at is not None:
                 return
             attempt.ended_at, attempt.code = self.clock(), error.code
+            log.retry_expires_at = attempt.ended_at + REQUEST_LEASE_SECONDS
             s.execute(delete(Lease).where(Lease.request_id == current["id"]))
             a = self.account(s, current["account_id"])
             if a.credential_version == current["version"]:
@@ -1439,6 +1461,7 @@ class Store:
             if not log:
                 return
             log.status, log.error_code, log.ended_at = "failed", code if code in allowed else "internal_error", self.clock()
+            log.retry_expires_at = None
             s.execute(delete(Lease).where(Lease.request_id == request_id))
             self.emit(s, state, "request", log.error_code, log.account_id, request_id=log.id)
 

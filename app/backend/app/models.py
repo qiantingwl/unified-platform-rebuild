@@ -1,4 +1,4 @@
-from sqlalchemy import Boolean, Float, Index, ForeignKey, Integer, String, Text, UniqueConstraint
+from sqlalchemy import Boolean, Float, Index, ForeignKey, Integer, String, Text, UniqueConstraint, text
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
@@ -155,13 +155,21 @@ class ApiKey(Base):
 
 class RequestLog(Base):
     __tablename__ = "request_logs"
-    __table_args__ = (Index('ix_request_logs_platform_time','platform','started_at','id'),Index('ix_request_logs_end_time','ended_at','id'),Index('ix_request_logs_account_time','account_id','started_at','id'))
+    __table_args__ = (
+        Index('ix_request_logs_platform_time','platform','started_at','id'),
+        Index('ix_request_logs_end_time','ended_at','id'),
+        Index('ix_request_logs_account_time','account_id','started_at','id'),
+        Index('ix_request_logs_retry_expiry', 'retry_expires_at', 'id',
+              postgresql_where=text("retry_expires_at IS NOT NULL"),
+              sqlite_where=text("retry_expires_at IS NOT NULL")),
+    )
     id: Mapped[str] = mapped_column(String(36), primary_key=True)
     platform: Mapped[str] = mapped_column(String(40))
     model: Mapped[str] = mapped_column(String(100))
     account_id: Mapped[str] = mapped_column(String(36), ForeignKey("accounts.id"))
     started_at: Mapped[float] = mapped_column(Float, index=True)
     ended_at: Mapped[float | None] = mapped_column(Float, nullable=True)
+    retry_expires_at: Mapped[float | None] = mapped_column(Float, nullable=True)
     placeholder_at: Mapped[float | None] = mapped_column(Float, nullable=True)
     first_content_at: Mapped[float | None] = mapped_column(Float, nullable=True)
     status: Mapped[str] = mapped_column(String(30), default="inflight")

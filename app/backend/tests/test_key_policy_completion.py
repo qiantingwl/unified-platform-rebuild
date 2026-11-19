@@ -5,10 +5,11 @@ import pytest
 from cryptography.fernet import Fernet
 from fastapi.testclient import TestClient
 from sqlalchemy import select,text
-from app.store import Store,DomainError,uid
-from app.models import Account,Resource,ModelState,RequestLog,Job,State
+from app.store import Store,DomainError,uid,REQUEST_LEASE_SECONDS
+from app.models import Account,Resource,ModelState,RequestLog,Job,State,Lease
 from app.key_policy import DEFAULT
 from app.main import create_app
+from app.upstream import UpstreamError
 from test_gateway import real_accounts
 
 @pytest.fixture
@@ -57,6 +58,43 @@ def test_key_limits_atomic_and_opt_in(context):
     now[0]+=61
     assert s.acquire(t,'model')
 
+def test_retry_gap_releases_account_but_keeps_key_admission(context):
+    store, token, key_id, _, _ = context
+    put_policy(store, key_id, max_concurrency=1)
+    first = store.acquire(token, 'model')
+    store.fail_attempt(first, UpstreamError('upstream_5xx', 502, True))
+    with store.read() as (session, _):
+        assert session.scalar(select(Lease).where(Lease.request_id == first['id'])) is None
+    with pytest.raises(DomainError, match='api_key_concurrency'):
+        store.acquire(token, 'model')
+    retry = store.acquire(token, 'model', excluded=[first['account_id']], request_id=first['id'])
+    assert retry['id'] == first['id'] and retry['account_id'] != first['account_id']
+    with store.read() as (session, _):
+        assert session.get(RequestLog, first['id']).retry_expires_at is None
+    store.end_request(retry['id'], 'cancelled', 'cancelled')
+    assert store.acquire(token, 'model')['id'] != first['id']
+
+
+def test_abandoned_retry_admission_state_expires_without_account_lease(context):
+    store, token, key_id, now, _ = context
+    put_policy(store, key_id, max_concurrency=1)
+    first = store.acquire(token, 'model')
+    store.fail_attempt(first, UpstreamError('upstream_5xx', 502, True))
+    # Reconnect the database after the assumed process exit. No worker state
+    # is needed to reclaim this key's otherwise permanent admission hold.
+    store.engine.dispose()
+    now[0] += REQUEST_LEASE_SECONDS - 1
+    with pytest.raises(DomainError, match='api_key_concurrency'):
+        store.acquire(token, 'model')
+    now[0] += 1
+    assert store.acquire(token, 'model')['id'] != first['id']
+    with store.read() as (session, _):
+        old = session.get(RequestLog, first['id'])
+        assert (old.status, old.error_code, old.retry_expires_at) == ('failed', 'lease_expired', None)
+    with pytest.raises(DomainError, match='request_not_retryable'):
+        store.acquire(token, 'model', request_id=first['id'])
+
+
 def test_multi_model_alias_expiry_and_ip_scope(context):
     s,t,k,now,_=context
     put_policy(s,k,models=['model','other'],aliases={'friendly':'model'},allowed_ips=['192.0.2.0/24'])
@@ -101,12 +139,18 @@ def test_existing_database_additive_migration(context):
     store,t,k,now,key=context
     with store.engine.begin() as c:
         c.execute(text('DROP INDEX IF EXISTS ix_request_logs_key_id'))
-        for field in ('output_tokens','total_tokens','reasoning_tokens','key_id'):
+        c.execute(text('DROP INDEX IF EXISTS ix_request_logs_retry_expiry'))
+        for field in ('output_tokens','total_tokens','reasoning_tokens','key_id','retry_expires_at'):
             c.execute(text(f'ALTER TABLE request_logs DROP COLUMN {field}'))
     reopened=Store(store.engine.url.render_as_string(hide_password=False),key,clock=store.clock)
+    reopened.real_capabilities = store.real_capabilities.copy()
     try:
         assert len(reopened.snapshot()['accounts'])==4
         assert reopened.snapshot()['requests']==[]
+        request = reopened.acquire(t, 'model')
+        reopened.fail_attempt(request, UpstreamError('upstream_5xx', 502, True))
+        with reopened.read() as (db, _):
+            assert db.get(RequestLog, request['id']).retry_expires_at == now[0] + REQUEST_LEASE_SECONDS
     finally:reopened.engine.dispose()
 
 
