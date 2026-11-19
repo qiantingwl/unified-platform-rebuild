@@ -2151,3 +2151,64 @@ body:has(.management-modal) .toast {
 }
 
 @media(max-width:700px){.topbar > .row:first-child{width:auto;flex:1;min-width:0;}}
+
+/* Operational directories: short headers, readable rows, and local scrolling. */
+main:has(.ops-page) { padding: 22px clamp(14px, 2.2vw, 30px) 20px; }
+.ops-page { min-width: 0; max-width: 100%; }
+.ops-page .pagehead { flex-wrap: wrap; gap: 10px 16px; margin-bottom: 14px; }
+.ops-page .pagehead h1 { font-size: clamp(21px, 2vw, 27px); line-height: 1.25; }
+.ops-page .pagehead p { margin-top: 4px; }
+.ops-page .toolbar { min-width: 0; flex-wrap: wrap; gap: 8px; margin-bottom: 10px; }
+.ops-page .toolbar > * { min-width: 0; max-width: 100%; }
+.ops-page .platformtabs { margin: 0 0 12px; }
+.ops-page .platformtabs button { padding-block: 7px; }
+.ops-page .panel + .panel { margin-top: 12px; }
+.ops-page .panelhead { padding: 10px 14px; }
+.ops-page .panelhead h2 { font-size: 14px; }
+.ops-page .tablewrap { overflow-x: auto; overscroll-behavior-inline: contain; }
+.ops-page .tablewrap table { white-space: normal; }
+.ops-page .tablewrap th { padding: 8px 10px; white-space: nowrap; }
+.ops-page .tablewrap td { padding: 7px 10px; line-height: 1.35; overflow-wrap: anywhere; }
+.ops-page .tablewrap td .btn { padding: 5px 8px; min-height: 28px; }
+.ops-page .tablewrap td .link { white-space: normal; text-align: left; }
+.ops-page .tablewrap td small { font-size: 11px; }
+.ops-page .tablefoot { padding: 8px 12px; min-height: 40px; flex-wrap: wrap; gap: 6px 10px; }
+.ops-page .tablefoot .btn, .ops-page .tablefoot select { min-height: 30px; padding-block: 4px; }
+.ops-page .noresults, .account-picker-list .noresults {
+  padding: 16px 12px;
+  font-size: 13px;
+  text-align: left;
+}
+.ops-accounts .compactmetrics {
+  margin: 0 0 10px;
+  padding: 8px 11px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  gap: 6px 16px;
+  background: var(--side);
+}
+.ops-accounts .compactmetrics span { padding: 0; }
+.ops-accounts .compactmetrics b { font-size: 15px; font-variant-numeric: tabular-nums; }
+.ops-accounts .tablewrap td:first-child, .ops-proxy .tablewrap td:first-child { width: 1%; }
+.ops-keys .tablewrap td:first-child { min-width: 125px; }
+.ops-keys .tablewrap td:last-child .row { gap: 4px; }
+.ops-routing .routing-summary { padding: 3px 14px 12px; gap: 5px 16px; }
+.ops-routing .panelhead .btn { font-size: 12px; }
+.ops-proxy .proxy-kernel { margin-bottom: 10px; padding: 8px 12px; }
+.ops-proxy .proxy-toolbar { padding: 7px 10px; }
+.ops-proxy .proxy-toolbar input { min-width: min(155px, 100%); }
+.ops-proxy .tablewrap td .proxy-source { max-width: 220px; }
+.account-picker-list .toolbar { margin-bottom: 8px; }
+.account-picker-list .picker-results { max-height: min(252px, 38dvh); min-height: 0; }
+.account-picker-list .picker-option { padding: 6px 9px; gap: 2px; }
+.account-picker-list .tablefoot { flex-wrap: wrap; padding: 6px 0 0; gap: 6px; }
+.account-picker-list .tablefoot .btn { padding: 4px 8px; min-height: 28px; }
+.ops-dialog-actions { display: flex; justify-content: flex-end; margin-top: 10px; }
+@media(max-width:700px) {
+  main:has(.ops-page) { padding-top: 14px; }
+  .ops-page .pagehead { align-items: flex-start; }
+  .ops-page .tablewrap th, .ops-page .tablewrap td { padding-inline: 7px; }
+  .ops-accounts .compactmetrics { display: grid; gap: 5px 8px; }
+  .ops-accounts .compactmetrics span { border: 0; background: transparent; }
+  .ops-proxy .proxy-toolbar input { min-width: 0; }
+}

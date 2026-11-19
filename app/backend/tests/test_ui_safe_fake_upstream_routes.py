@@ -112,3 +112,23 @@ def test_model_sync_fake_catalog_persists_and_failure_preserves_prior(context):
     assert failed.status_code == 503 and failed.json()["error"]["code"] == "network"
     assert store.resources("model_catalog")[0]["data"] == old
     assert registry.closed == 2
+
+
+def test_catalog_account_picker_returns_only_enabled_valid_platform_accounts(context):
+    store, registry, client = context
+    account_ids = {name: account(store, f"picker-{name}") for name in ("valid", "disabled", "pending")}
+    foreign = store.create_account("WPS 灵犀", "picker-foreign", "Synthetic WPS")
+    with store.tx() as (s, _):
+        for aid in (account_ids['valid'], account_ids['disabled'], foreign):
+            s.get(Account, aid).credential_status = "valid"
+        s.get(Account, account_ids['disabled']).enabled = False
+
+    response = client.get('/api/accounts/picker', params={'platform': 'Loomy', 'capability': 'models'})
+    assert response.status_code == 200
+    assert response.json()['total'] == 1
+    item, = response.json()['items']
+    assert item['id'] == account_ids['valid'] and item['platform'] == 'Loomy'
+    assert not {'credential', 'external_id', 'balance', 'credential_status'}.intersection(item)
+    assert client.get('/api/accounts/picker', params={'platform': 'Loomy', 'capability': 'models', 'q': 'picker-disabled'}).json()['total'] == 0
+    assert client.get('/api/accounts/picker', params={'platform': 'Loomy'}).json()['total'] == 3
+    assert registry.made == []

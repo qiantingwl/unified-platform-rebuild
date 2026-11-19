@@ -28,11 +28,12 @@ import {
   accountIdentity,
 } from "../components/Management";
 function Accounts() {
-  const { data, filter, setFilter, setDrawer, mutate, refresh } = useApp();
+  const { data, filter, setFilter, setDrawer, mutate, refresh, manualRefresh } =
+    useApp();
   const [saving, setSaving] = useState(null),
     [error, setError] = useState("");
   const [q, setQ] = useState(""),
-    [page, setPage] = useState(1),
+    [pageState, setPageState] = useState({ index: 1, key: null }),
     [credit, setCredit] = useState("all"),
     [sort, setSort] = useState("default");
   const [selected, setSelected] = useState([]),
@@ -110,9 +111,26 @@ function Accounts() {
   }
   const [pageSize, setPageSize] = useState(25);
   const search = useDebounced(q);
+  const pageKey = JSON.stringify([
+    filter.platform,
+    filter.status,
+    search,
+    credit,
+    sort,
+    pageSize,
+  ]);
+  const page = pageState.key === pageKey ? pageState.index : 1;
+  const setPage = (index) => setPageState({ index, key: pageKey });
+  useEffect(() => {
+    setPageState((old) =>
+      old.key === pageKey ? old : { index: 1, key: pageKey },
+    );
+  }, [pageKey]);
   const directory = useQuery(
     `/api/accounts?${queryString({ q: search, page, page_size: pageSize, platform: filter.platform === "全部平台" ? "" : filter.platform, status: filter.status, balance_state: credit, sort })}`,
-    data.revision,
+    // The global timeline changes on every task. Keep this expensive list fresh
+    // without spending each task revision on another identical-page query.
+    `${Math.floor((data.as_of || 0) / 8)}:${manualRefresh ?? 0}`,
     0,
     { retainPrevious: true },
   );
@@ -120,10 +138,6 @@ function Accounts() {
     rows = result?.items || [];
   const t = result?.summary || {},
     s = t;
-  useEffect(
-    () => setPage(1),
-    [filter.platform, filter.status, search, credit, sort, pageSize],
-  );
   useEffect(() => {
     if (
       !directory.loading &&
@@ -138,7 +152,7 @@ function Accounts() {
     [page, pageSize, search, filter.platform, filter.status, credit],
   );
   return (
-    <>
+    <div className="ops-page ops-accounts">
       <Head name="账户" desc="账户开关、凭证、额度与当前接单状态分别记录。">
         <a className="btn" href="#imports">
           导入账户
@@ -404,6 +418,9 @@ function Accounts() {
         )}
         <Table
           loading={directory.loading}
+          empty={
+            directory.error ? "账户列表暂未读取成功" : "没有符合筛选条件的账户"
+          }
           heads={[
             <input
               type="checkbox"
@@ -465,6 +482,7 @@ function Accounts() {
                       { enabled },
                       enabled ? "账户已开启。" : "账户已由你手动关闭。",
                     );
+                    directory.reload();
                   } catch (e) {
                     setError(e.message);
                   } finally {
@@ -505,6 +523,7 @@ function Accounts() {
                           undefined,
                           "限制已解除，下一次请求会重新验证。",
                         );
+                        directory.reload();
                       } catch (e) {
                         setError(e.message);
                       } finally {
@@ -532,6 +551,7 @@ function Accounts() {
                           undefined,
                           "已排入核验，余额可读后会自动回到候选池。",
                         );
+                        directory.reload();
                       } catch (e) {
                         setError(e.message);
                       } finally {
@@ -575,7 +595,8 @@ function Accounts() {
           }
           pageSize={pageSize}
           total={result?.total}
-          loading={directory.loading}
+          loading={directory.isPrevious || (directory.loading && !result)}
+          refreshing={directory.loading && !!result && !directory.isPrevious}
           onPage={setPage}
           onPageSize={setPageSize}
         />
@@ -733,7 +754,7 @@ function Accounts() {
           ])}
         />
       </Modal>
-    </>
+    </div>
   );
 }
 

@@ -406,7 +406,7 @@ export default function Routing() {
     (p) => p.platform === platform,
   );
   return (
-    <>
+    <div className="ops-page ops-routing">
       <Head
         name={modelsOnly ? "模型管理" : "路由配置"}
         desc={
@@ -416,7 +416,15 @@ export default function Routing() {
         }
       >
         {modelsOnly ? (
-          <Button onClick={() => setSync(true)}>同步模型</Button>
+          <Button
+            onClick={() => {
+              setSource("");
+              setError("");
+              setSync(true);
+            }}
+          >
+            同步模型
+          </Button>
         ) : (
           <>
             <Button
@@ -468,6 +476,14 @@ export default function Routing() {
       {modelsOnly && (
         <Panel name="模型目录">
           <Table
+            loading={query.loading}
+            empty={
+              query.error
+                ? "暂未读取到模型目录"
+                : search
+                  ? "没有匹配的模型"
+                  : "尚未同步模型。点击「同步模型」读取当前平台的官方目录。"
+            }
             heads={["模型", "上下文 / 最大输出", "能力", "同步时间", "操作"]}
             rows={(query.result?.items || []).map((m) => {
               const size = (v) =>
@@ -502,13 +518,14 @@ export default function Routing() {
               ];
             })}
           />
-          <Pagination
-            page={page}
-            pageSize={25}
-            total={query.result?.total}
-            loading={query.loading}
-            onPage={setPage}
-          />
+          {query.result?.total > 0 && (
+            <Pagination
+              page={page}
+              pageSize={25}
+              total={query.result.total}
+              onPage={setPage}
+            />
+          )}
         </Panel>
       )}
       {!modelsOnly && (
@@ -526,10 +543,19 @@ export default function Routing() {
           </div>
         </Panel>
       )}
-      <Panel name={modelsOnly ? "模型别名" : "当前模型映射"}>
+      <Panel
+        name={modelsOnly ? "模型别名" : "当前模型映射"}
+        action={
+          modelsOnly ? (
+            <a className="btn" href="#routing">
+              管理模型映射
+            </a>
+          ) : undefined
+        }
+      >
         <Table
           loading={routes.loading}
-          empty="尚未设置模型映射，可使用右上方编辑路由添加。"
+          empty="尚未设置模型映射，调用时使用平台原始模型名。"
           heads={["调用模型", "上游模型", "账户范围", "状态"]}
           rows={(routes.result?.mappings || []).map((m) => [
             m.model,
@@ -617,9 +643,12 @@ export default function Routing() {
           if (!submitting.current) setSync(open);
         }}
         title={`${platform} · 同步模型目录`}
-        description="读取官方目录，不改变账户模型权限"
+        size="small"
+        description="选择一个凭证有效的账户读取官方目录。"
       >
         <AccountPicker
+          inline
+          disabled={busy}
           platform={platform}
           capability="models"
           value={source}
@@ -628,37 +657,39 @@ export default function Routing() {
           required
         />
         {error && <Notice>{error}</Notice>}
-        <Button
-          variant="primary"
-          disabled={
-            busy ||
-            !source ||
-            !data.adapter_catalog?.[platform]?.network_enabled
-          }
-          onClick={async () => {
-            if (submitting.current) return;
-            submitting.current = true;
-            setBusy(true);
-            setError("");
-            try {
-              await mutate(
-                `/api/accounts/${source}/models/sync`,
-                "POST",
-                {},
-                "模型目录已同步。",
-              );
-              query.reload();
-              setSync(false);
-            } catch (e) {
-              setError(e.message);
-            } finally {
-              submitting.current = false;
-              setBusy(false);
+        <div className="ops-dialog-actions">
+          <Button
+            variant="primary"
+            disabled={
+              busy ||
+              !source ||
+              !data.adapter_catalog?.[platform]?.network_enabled
             }
-          }}
-        >
-          {busy ? "同步中…" : "同步官方模型"}
-        </Button>
+            onClick={async () => {
+              if (submitting.current) return;
+              submitting.current = true;
+              setBusy(true);
+              setError("");
+              try {
+                await mutate(
+                  `/api/accounts/${source}/models/sync`,
+                  "POST",
+                  {},
+                  "模型目录已同步。",
+                );
+                query.reload();
+                setSync(false);
+              } catch (e) {
+                setError(e.message);
+              } finally {
+                submitting.current = false;
+                setBusy(false);
+              }
+            }}
+          >
+            {busy ? "同步中…" : "同步官方模型"}
+          </Button>
+        </div>
       </Modal>
       <Modal
         open={policyOpen}
@@ -759,6 +790,6 @@ export default function Routing() {
         open={edit}
         onClose={() => setEdit(false)}
       />
-    </>
+    </div>
   );
 }

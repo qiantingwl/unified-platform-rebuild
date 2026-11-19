@@ -76,6 +76,7 @@ export function Pagination({
   loading,
   onPage,
   onPageSize,
+  refreshing = false,
 }) {
   const known = total != null && Number.isFinite(Number(total));
   const pages = known ? Math.max(1, Math.ceil(Number(total) / pageSize)) : null;
@@ -83,7 +84,7 @@ export function Pagination({
     <div className="tablefoot">
       <span>
         {total == null ? "正在查询记录数" : `共 ${nf(total)} 条`}{" "}
-        {loading && " · 正在更新…"}
+        {(loading || refreshing) && " · 正在更新…"}
       </span>
       <div className="row wrap">
         {onPageSize && (
@@ -148,6 +149,8 @@ export function AccountPicker({
   required = false,
   label = "选择账户",
   revision = 0,
+  inline = false,
+  disabled = false,
 }) {
   const [open, setOpen] = useState(false),
     [q, setQ] = useState(""),
@@ -159,12 +162,83 @@ export function AccountPicker({
   }, [platform, capability]);
   const search = useDebounced(q);
   const query = useQuery(
-    open
-      ? `/api/accounts?${queryString({ platform, capability, q: search, page, page_size: 25 })}`
+    open || inline
+      ? `/api/accounts/picker?${queryString({ platform, capability, q: search, page, page_size: 25 })}`
       : null,
     revision,
   );
   const result = query.result;
+  const picker = (
+    <div className="account-picker-list">
+      <div className="toolbar">
+        <div className="searchbox">
+          <Search size={15} />
+          <input
+            autoFocus
+            disabled={disabled}
+            aria-label="搜索原始账户身份"
+            value={q}
+            placeholder="原名称 / UID / 脱敏身份"
+            onChange={(e) => {
+              setQ(e.target.value);
+              setPage(1);
+            }}
+          />
+        </div>
+      </div>
+      {query.error && (
+        <Notice>
+          {query.error}
+          <Button onClick={query.reload}>重试</Button>
+        </Notice>
+      )}
+      <div className="picker-results" aria-busy={query.loading}>
+        {(result?.items || []).map((a) => (
+          <button
+            type="button"
+            className={`picker-option ${a.id === value ? "selected" : ""}`}
+            aria-pressed={a.id === value}
+            disabled={disabled}
+            key={a.id}
+            onClick={() => {
+              setSelected(a);
+              onChange(a.id, a);
+              if (!inline) setOpen(false);
+            }}
+          >
+            <strong>{accountName(a)}</strong>
+            <small>
+              {a.platform} · {accountIdentity(a)}
+            </small>
+          </button>
+        ))}
+        {!result && query.loading && (
+          <div className="noresults" role="status">
+            正在读取账户…
+          </div>
+        )}
+        {result?.total === 0 && (
+          <div className="noresults">
+            {q
+              ? "没有匹配的账户，请调整搜索条件。"
+              : capability === "models"
+                ? "当前平台没有已启用且凭证有效的账户。"
+                : "当前平台没有可选账户。"}
+          </div>
+        )}
+      </div>
+      {result?.total > 0 && (
+        <Pagination
+          page={result.page}
+          pageSize={25}
+          total={result.total}
+          loading={disabled || !result}
+          onPage={setPage}
+        />
+      )}
+    </div>
+  );
+  if (inline) return picker;
   return (
     <div className="account-picker">
       <input type="hidden" name={name} value={value} />
@@ -194,58 +268,10 @@ export function AccountPicker({
         open={open}
         onOpenChange={setOpen}
         title={label}
-        description="按平台身份、原名称搜索，翻页只读取当前页"
+        size="small"
+        description="按原名称或 UID 查找账户。"
       >
-        <div className="toolbar">
-          <div className="searchbox">
-            <Search size={15} />
-            <input
-              autoFocus
-              aria-label="搜索原始账户身份"
-              value={q}
-              placeholder="原名称 / UID / 脱敏身份"
-              onChange={(e) => {
-                setQ(e.target.value);
-                setPage(1);
-              }}
-            />
-          </div>
-        </div>
-        {query.error && (
-          <Notice>
-            {query.error}
-            <Button onClick={query.reload}>重试</Button>
-          </Notice>
-        )}
-        <div className="picker-results" aria-busy={query.loading}>
-          {(result?.items || []).map((a) => (
-            <button
-              type="button"
-              className={`picker-option ${a.id === value ? "selected" : ""}`}
-              key={a.id}
-              onClick={() => {
-                setSelected(a);
-                onChange(a.id, a);
-                setOpen(false);
-              }}
-            >
-              <strong>{accountName(a)}</strong>
-              <small>
-                {a.platform} · {accountIdentity(a)}
-              </small>
-            </button>
-          ))}
-          {!query.loading && !query.error && !result?.items?.length && (
-            <div className="noresults">没有匹配的账户，请调整搜索条件。</div>
-          )}
-        </div>
-        <Pagination
-          page={page}
-          pageSize={25}
-          total={result?.total}
-          loading={query.loading}
-          onPage={setPage}
-        />
+        {picker}
       </Modal>
     </div>
   );

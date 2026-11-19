@@ -33,7 +33,7 @@ export default function Keys() {
     }
   }
   return (
-    <>
+    <div className="ops-page ops-keys">
       <Head
         name="API 密钥"
         desc="用于模型调用的独立密钥；完整内容仅在创建时展示一次。"
@@ -105,7 +105,7 @@ export default function Keys() {
             return [
               <>
                 {k.name}
-                <small>{k.prefix}… · 仅保存摘要</small>
+                <small>{k.prefix}…</small>
               </>,
               k.platform,
               (k.policy?.models || [k.model]).join("、"),
@@ -114,13 +114,16 @@ export default function Keys() {
                   ? `并发 ${k.policy.max_concurrency}`
                   : "并发不另设限"}
                 <small>
-                  {k.policy?.rpm ? `${k.policy.rpm} RPM` : "RPM 不另设限"} ·{" "}
-                  {k.policy?.daily_requests
-                    ? `每日 ${k.policy.daily_requests} 次`
-                    : "每日不另设限"}
-                </small>
-                <small>
-                  {k.policy?.expires_at ? tm(k.policy.expires_at) : "永不过期"}
+                  {[
+                    k.policy?.rpm && `${k.policy.rpm} RPM`,
+                    k.policy?.daily_requests &&
+                      `每日 ${k.policy.daily_requests} 次`,
+                    k.policy?.expires_at
+                      ? tm(k.policy.expires_at)
+                      : "无到期时间",
+                  ]
+                    .filter(Boolean)
+                    .join(" · ")}
                 </small>
               </>,
               revoked ? (
@@ -192,6 +195,6 @@ export default function Keys() {
           </Button>
         </div>
       </Modal>
-    </>
+    </div>
   );
 }

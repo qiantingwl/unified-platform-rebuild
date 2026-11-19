@@ -9,7 +9,7 @@ from .registration_queries import field
 def snapshot(store,capacity):
     now=store.clock();day=day_at(now)
     with store.read() as (s,state):
-        source=directory_query(store,s,now).subquery()
+        source=directory_query(store,s,now,include_balance=False).subquery()
         reasons=dict(s.execute(select(source.c.directory_status,func.count()).group_by(source.c.directory_status)).all())
         total=sum(reasons.values())
         today={k:{} for k in PRIORITY}

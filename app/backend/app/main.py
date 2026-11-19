@@ -603,7 +603,9 @@ def create_app(store=None, start_worker=True, admin_token=None, registry=None, r
     from .management import mount_management
     mount_management(app, store, registry)
     from .account_directory import mount_account_directory
-    mount_account_directory(app, store)
+    mount_account_directory(app, store, tuple(
+        p for p, cls in ADAPTERS.items() if registry.enabled and 'models' in cls.capabilities
+    ))
     from .key_directory import mount_key_directory
     mount_key_directory(app, store)
     from .admin_queries import mount_admin_queries

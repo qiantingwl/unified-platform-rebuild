@@ -51,7 +51,7 @@ const statusNames = {
   disabled: "已停用",
   retired: "已退役",
   pending_kernel: "等待内核",
-  untested: "待检测",
+  untested: "未做通用检测",
   ready: "就绪",
   active: "启用",
 };
@@ -233,11 +233,11 @@ export function Proxies() {
     if (!c.checked_at || Date.now() / 1000 - c.checked_at > 86400)
       return "结果已过期";
     return c.eligible
-      ? "网站已连接（未测模型）"
+      ? "目标网站已响应 · 未测模型"
       : resultNames[c.code] || c.code;
   }
   return (
-    <>
+    <div className="ops-page ops-proxy">
       <Head name="代理节点" desc="管理节点与订阅，按平台检测真实目标网站。" />
       <div className="proxy-kernel" role="status">
         <strong>Mihomo 内核</strong>
@@ -449,8 +449,8 @@ export function Proxies() {
             />,
             "节点 / 来源",
             "协议",
-            "状态",
-            "目标结果",
+            "节点状态",
+            `${platform} · 网站检测`,
             "检测时间",
             "操作",
           ])}
@@ -482,20 +482,7 @@ export function Proxies() {
                     n.data.status,
                   ) &&
                   (!n.data.kernel_state || kernel?.listeners_ready) && (
-                    <small className="proxy-source">
-                      {n.address}{" "}
-                      <Button
-                        onClick={async () => {
-                          try {
-                            await navigator.clipboard.writeText(n.address);
-                          } catch {
-                            setError("复制失败，请手动选择地址。");
-                          }
-                        }}
-                      >
-                        复制无认证地址
-                      </Button>
-                    </small>
+                    <small className="proxy-source">{n.address}</small>
                   )}
               </>,
               n.data.scheme,
@@ -515,6 +502,23 @@ export function Proxies() {
                 disabled={busy || awaiting || directory.isPrevious}
               >
                 {(busy || awaiting) && <small>操作进行中…</small>}
+                {n.address &&
+                  !["disabled", "retired", "pending_kernel"].includes(
+                    n.data.status,
+                  ) &&
+                  (!n.data.kernel_state || kernel?.listeners_ready) && (
+                    <Button
+                      onClick={async () => {
+                        try {
+                          await navigator.clipboard.writeText(n.address);
+                        } catch {
+                          setError("复制失败，请手动选择地址。");
+                        }
+                      }}
+                    >
+                      复制无认证地址
+                    </Button>
+                  )}
                 <Button
                   disabled={busy || awaiting || directory.isPrevious}
                   onClick={() => {
@@ -664,7 +668,7 @@ export function Proxies() {
           确认执行
         </Button>
       </Modal>
-    </>
+    </div>
   );
 }
 export { default as Invitations } from "./Invitations";

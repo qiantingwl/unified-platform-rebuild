@@ -1,5 +1,5 @@
 """Database-backed account directory; no credential payloads or snapshot scans."""
-from sqlalchemy import select, func, case, and_, or_, literal, union_all, cast
+from sqlalchemy import select, func, case, and_, or_, literal, union_all, cast, true, text
 from fastapi import Query
 from sqlalchemy.orm import aliased
 from collections import Counter
@@ -16,18 +16,8 @@ def identity(a):
     return dict(original_label=original, display_name=original or f"{a.platform} · {hint}", identity_hint=hint, external_id_hint=hint, source_label=None)
 
 
-def directory_query(store, s, now):
+def directory_query(store, s, now, *, include_balance=True):
     busy = select(Lease.account_id.label('aid'), func.count().label('busy')).where(Lease.expires_at > now).group_by(Lease.account_id).subquery()
-    # Seek the newest completed balance for this account and credential.
-    # The old window ranked the entire history, even for a single account lookup.
-    last = aliased(Job, name='directory_latest_balance')
-    balance_job = (select(Job.id)
-        .where(Job.account_id == Account.id, Job.kind == 'balance',
-               Job.credential_version == Account.credential_version,
-               Job.status.in_(['succeeded', 'failed']), Job.finished_at.is_not(None))
-        .order_by(Job.finished_at.desc(), Job.finished_revision.desc().nulls_last(),
-                  Job.created_at.desc(), Job.id.desc())
-        .limit(1).correlate(Account).scalar_subquery())
     count = func.coalesce(busy.c.busy, 0)
     supported = [p for p,c in store.real_capabilities.items() if 'chat' in c]
     from .key_policy import read as key_policy
@@ -77,8 +67,30 @@ def directory_query(store, s, now):
     routed=case((usable_route,ready),(route,block if block is not None else 'no_route'),else_='no_route')
     no_checkin=[p for p,c in store.real_capabilities.items() if 'checkin' not in c]
     status=case((~Account.enabled,'manually_disabled'),(and_(~Account.sandbox,Account.platform.not_in(supported)),'adapter_unavailable'),(Account.credential_status=='missing','missing_credential'),(Account.credential_status=='invalid','needs_relogin'),(Account.credential_status=='disabled','upstream_disabled'),(Account.credential_status=='suspect','credential_review'),(Account.credential_status!='valid','credential_pending'),(or_(Account.balance.is_(None),Account.balance_version!=Account.credential_version,Account.balance_at.is_(None)),'balance_pending'),(Account.balance<=0,case((and_(~Account.sandbox,Account.platform.in_(no_checkin)),'no_balance'),(Account.checkin_day==day_at(now),'balance_exhausted'),else_='checkin_pending')),else_=routed).label('directory_status')
-    balance = case((last.status == 'failed','failed'),(Account.balance.is_(None),'unknown'),(or_(Account.balance_version != Account.credential_version, Account.balance_at.is_(None),Account.balance_at < now-3600),'stale'),else_='verified').label('balance_state')
-    return select(Account, count.label('busy'),status,balance,last.error_code.label('balance_error')).outerjoin(readiness,readiness.c.aid==Account.id).outerjoin(busy,busy.c.aid==Account.id).outerjoin(last,last.id==balance_job)
+    stmt = select(Account, count.label('busy'), status).outerjoin(readiness, readiness.c.aid == Account.id).outerjoin(busy, busy.c.aid == Account.id)
+    if not include_balance:
+        return stmt
+    # Seek the newest completed balance for this account and credential.
+    # The old window ranked the entire history, even for a single account lookup.
+    last = aliased(Job, name='directory_latest_balance')
+    latest_balance = (select(Job.id, Job.status, Job.error_code)
+        .where(Job.account_id == Account.id, Job.kind == 'balance',
+               Job.credential_version == Account.credential_version,
+               Job.status.in_(['succeeded', 'failed']), Job.finished_at.is_not(None))
+        .order_by(Job.finished_at.desc(), Job.finished_revision.desc().nulls_last(),
+                  Job.created_at.desc(), Job.id.desc())
+        .limit(1).correlate(Account))
+    if s.get_bind().dialect.name == 'postgresql':
+        # Per-account index lookup. Avoid joining against a second copy of the
+        # entire job table before aggregating the directory.
+        recent = latest_balance.lateral('directory_balance_result')
+        balance_join = (recent, true())
+        last_status, last_error = recent.c.status, recent.c.error_code
+    else:
+        balance_join = (last, last.id == latest_balance.with_only_columns(Job.id).scalar_subquery())
+        last_status, last_error = last.status, last.error_code
+    balance = case((last_status == 'failed','failed'),(Account.balance.is_(None),'unknown'),(or_(Account.balance_version != Account.credential_version, Account.balance_at.is_(None), Account.balance_at < now-3600),'stale'),else_='verified').label('balance_state')
+    return stmt.add_columns(balance, last_error.label('balance_error')).outerjoin(*balance_join)
 
 
 def serialize(row):
@@ -89,17 +101,33 @@ def serialize(row):
     return result
 
 
-def mount_account_directory(app,store):
+def tune_directory(session):
+    if session.get_bind().dialect.name == 'postgresql':
+        # The routing UNION can make PostgreSQL compile every query anew.
+        # This is small index work; only these directory reads skip JIT.
+        session.execute(text('SET LOCAL jit = off'))
+
+
+def mount_account_directory(app, store, catalog_platforms=()):
+    def scoped(stmt, platform, q, capability):
+        if platform:
+            stmt = stmt.where(Account.platform == platform)
+        if q:
+            stmt = stmt.where(or_(Account.label.icontains(q, autoescape=True),
+                Account.original_label.icontains(q, autoescape=True), Account.external_id.icontains(q, autoescape=True),
+                Account.id.icontains(q, autoescape=True)))
+        if capability == 'models':
+            stmt = stmt.where(Account.platform.in_(catalog_platforms), Account.enabled.is_(True),
+                Account.credential_status == 'valid', Account.sandbox.is_(False))
+        elif capability:
+            stmt = stmt.where(Account.platform.in_([p for p, caps in store.real_capabilities.items() if capability in caps]))
+        return stmt
     @app.get('/api/accounts')
     def accounts(page:int=Query(1,ge=1),page_size:int=Query(25,ge=1,le=200),q:str='',platform:str='',status:str='',balance_state:str='',sort:str='default',capability:str=''):
         now=store.clock()
         with store.read() as (s,_):
-            stmt=directory_query(store,s,now)
-            if platform: stmt=stmt.where(Account.platform==platform)
-            if q: stmt=stmt.where(or_(Account.label.icontains(q,autoescape=True),Account.original_label.icontains(q,autoescape=True),Account.external_id.icontains(q,autoescape=True),Account.id.icontains(q,autoescape=True)))
-            if capability:
-                allowed=[p for p,c in store.real_capabilities.items() if capability in c]
-                stmt=stmt.where(Account.platform.in_(allowed))
+            tune_directory(s)
+            stmt = scoped(directory_query(store, s, now), platform, q, capability)
             if balance_state and balance_state != 'all': stmt=stmt.where(stmt.selected_columns.balance_state==balance_state)
             base=stmt.subquery()
             aggregates=[dict(row._mapping) for row in s.execute(select(base.c.directory_status,base.c.balance_state,
@@ -125,9 +153,22 @@ def mount_account_directory(app,store):
             summary=dict(total=total,ready=status_totals.get('ready',0),busy=status_totals.get('busy',0),unavailable=total-status_totals.get('ready',0)-status_totals.get('busy',0),known=sums[2],knownSum=sums[0],sum=sums[1],**{k:states.get(k,0) for k in ('verified','stale','unknown','failed')})
             return dict(items=[serialize(r) for r in rows],total=total,page=actual_page,page_size=page_size,summary=summary,status_counts=counts,as_of=now,business_day=day_at(now))
 
+    @app.get('/api/accounts/picker')
+    def picker(page: int = Query(1, ge=1), page_size: int = Query(25, ge=1, le=100),
+               q: str = '', platform: str = '', capability: str = ''):
+        # Selection only needs identity, not route, balance or maintenance history.
+        with store.read() as (s, _):
+            total = s.scalar(scoped(select(func.count()).select_from(Account), platform, q, capability))
+            actual_page = min(page, max(1, (total + page_size - 1) // page_size))
+            rows = s.scalars(scoped(select(Account), platform, q, capability)
+                .order_by(Account.created_at, Account.id).offset((actual_page - 1) * page_size).limit(page_size))
+            return dict(items=[dict(id=a.id, platform=a.platform, **identity(a)) for a in rows],
+                        page=actual_page, page_size=page_size, total=total)
+
     @app.get('/api/accounts/{account_id}')
     def detail(account_id:str):
         with store.read() as (s,_):
+            tune_directory(s)
             store.account(s,account_id)
             now = store.clock()
             result = serialize(s.execute(directory_query(store,s,now).where(Account.id==account_id)).one())

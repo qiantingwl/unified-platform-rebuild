@@ -2,7 +2,7 @@
 from fastapi import Query
 from sqlalchemy import select,func,case,or_
 from .models import Event,Account
-from .account_directory import directory_query,identity
+from .account_directory import directory_query, identity, tune_directory
 from .store import day_at
 
 
@@ -11,6 +11,7 @@ def mount_admin_queries(app,store):
     def overview():
         now=store.clock()
         with store.read() as (s,_):
+            tune_directory(s)
             source=directory_query(store,s,now).subquery()
             columns=[source.c.platform,func.count().label('total')]
             columns += [func.sum(case((source.c.directory_status==k,1),else_=0)).label(k) for k in ('ready','busy')]

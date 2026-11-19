@@ -390,6 +390,7 @@ function App() {
     [message, setMessage] = useState(""),
     [login, setLogin] = useState(false),
     [sessionReady, setSessionReady] = useState(false),
+    [manualRefresh, setManualRefresh] = useState(0),
     [mobile, setMobile] = useState(false),
     [mobileControls, setMobileControls] = useState(false),
     [dark, setDark] = useState(() => {
@@ -592,6 +593,7 @@ function App() {
         action: (...args) => mutate(...args).catch(() => undefined),
         openAccounts,
         refresh,
+        manualRefresh,
       }}
     >
       {mobile && (
@@ -715,7 +717,13 @@ function App() {
             >
               退出登录
             </Button>
-            <Button icon={RefreshCw} onClick={refresh}>
+            <Button
+              icon={RefreshCw}
+              onClick={() => {
+                setManualRefresh((n) => n + 1);
+                refresh();
+              }}
+            >
               刷新
             </Button>
             <button

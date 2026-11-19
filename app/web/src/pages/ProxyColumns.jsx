@@ -3,9 +3,9 @@ import { Button } from "../ui";
 const defaults = {
   order: [2, 3, 4, 5],
   visible: [2, 3, 4, 5],
-  widths: { 2: 90, 3: 110, 4: 240, 5: 150 },
+  widths: { 2: 64, 3: 96, 4: 175, 5: 128 },
 };
-const names = { 2: "协议", 3: "状态", 4: "目标结果", 5: "检测时间" };
+const names = { 2: "协议", 3: "节点状态", 4: "网站检测", 5: "检测时间" };
 export function useProxyColumns() {
   const [config, setConfig] = useState(() => {
     try {
