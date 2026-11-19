@@ -87,9 +87,45 @@ def _fixed_egress_held(store, session, row, platform, health=None):
         value = json.loads(observation.data) if observation else {}
     else:
         value = health.get(name, {})
-    return (value.get("node_version") == row.version
+    return _fixed_hold_active(value, row.version, store.clock())
+
+
+def _fixed_hold_active(value, node_version, now):
+    return (value.get("node_version") == node_version
             and value.get("failure_phase") in {"connect", "proxy_connect"}
-            and value.get("retry_at", 0) > store.clock())
+            and value.get("retry_at", 0) > now)
+
+
+def held_forwarding_accounts(session, platform, now):
+    """Snapshot accounts whose fixed exit already has a current connection hold.
+
+    Read only metadata in the admission transaction. Account bindings override
+    platform routes; pools retain their own selection and recovery rules.
+    """
+    prefix = f"{platform}:"
+    observations = {}
+    for name, raw in session.execute(select(Resource.name, Resource.data).where(
+            Resource.kind == "proxy_health", Resource.name.startswith(prefix, autoescape=True))):
+        data = json.loads(raw)
+        if data.get("failure_phase") in {"connect", "proxy_connect"} and data.get("retry_at", 0) > now:
+            observations[name[len(prefix):]] = data
+    if not observations:
+        return set()
+    held_nodes = {node_id for node_id, version in session.execute(select(Resource.id, Resource.version).where(
+        Resource.kind == "proxy", Resource.id.in_(observations)))
+        if _fixed_hold_active(observations[node_id], version, now)}
+    if not held_nodes:
+        return set()
+    route_row = _row(session, "proxy_route", platform)
+    route = json.loads(route_row.data) if route_row else {}
+    platform_held = route.get("mode") == "fixed" and route.get("proxy_id") in held_nodes
+    bindings = dict(session.execute(select(Resource.name, Resource.data).join(
+        Account, Account.id == Resource.name).where(Resource.kind == "proxy_binding", Account.platform == platform)).all())
+    held = {aid for aid, raw in bindings.items() if json.loads(raw).get("proxy_id") in held_nodes}
+    if platform_held:
+        held.update(aid for aid in session.scalars(select(Account.id).where(Account.platform == platform))
+                    if aid not in bindings)
+    return held
 
 
 def _endpoint(store, row, session=None, platform=None, *, fixed=False):

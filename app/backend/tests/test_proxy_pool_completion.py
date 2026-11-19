@@ -9,7 +9,7 @@ from sqlalchemy import select
 from app.main import create_app
 from app.proxy_pool import PoolInput, RouteInput, record_proxy_result, resolve_account_proxy, save_pool, save_route
 from app.store import DomainError, Store
-from app.models import RequestAttempt, Resource
+from app.models import Account, Lease, RequestAttempt, Resource
 from app.gateway import Gateway
 from test_gateway import FakeRegistry, delta, real_accounts
 
@@ -140,6 +140,83 @@ def test_failed_fixed_route_switches_account_without_rebinding_or_direct_retry(s
         attempts = list(s.scalars(select(RequestAttempt)))
         assert len(attempts) == 2
         assert next(a for a in attempts if a.account_id == current["account_id"]).code == "proxy_retired"
+
+
+def hold_connection(store, account, endpoint):
+    record_proxy_result(store, account, endpoint, success=False, code="network", failure_phase="proxy_connect")
+
+
+def test_known_failed_fixed_proxies_do_not_spend_gateway_attempts(store):
+    token = real_accounts(store, n=4)
+    with store.tx() as (s, _):
+        accounts = list(s.scalars(select(Account).order_by(Account.external_id)))
+        for i, account in enumerate(accounts):
+            account.priority = 100 - i
+        bad = [a.id for a in accounts[:3]]
+        good = accounts[3].id
+    for i, account in enumerate(bad):
+        url = f"http://fixture-down-{i}.invalid:8080"
+        node = store.resource_put("proxy", f"down-{i}", {"status": "untested"}, secret=url)
+        store.bind_proxy(account, node)
+        hold_connection(store, account, url)
+    registry = FakeRegistry([[delta("answer"), {"_done": True}]])
+    current = store.acquire(token, "model")
+
+    async def run():
+        return [frame async for frame in Gateway(store, registry).frames(token, {"model": "model"}, current)]
+
+    frames = asyncio.run(run())
+    assert frames[0]["placeholder"] and frames[-1] == {"finish": "stop"}
+    assert registry.calls == [good]
+    with store.read() as (s, _):
+        attempts = list(s.scalars(select(RequestAttempt)))
+        assert [a.account_id for a in attempts] == [good]
+        assert not list(s.scalars(select(Lease)))
+        assert all(a.enabled for a in s.scalars(select(Account)))
+
+
+@pytest.mark.parametrize("recovered_by", ["retry_deadline", "new_node_version"])
+def test_platform_fixed_hold_respects_account_override_and_recovery(store, recovered_by):
+    token = real_accounts(store, n=2)
+    t = store.clock()
+    store.clock = lambda: t
+    with store.tx() as (s, _):
+        first, second = list(s.scalars(select(Account).order_by(Account.external_id)))
+        first.priority = 99
+        preferred, override = first.id, second.id
+    primary = "http://fixture-primary.invalid:8080"
+    node = store.resource_put("proxy", "primary", {"status": "untested"}, secret=primary)
+    alternate = store.resource_put("proxy", "alternate", {"status": "untested"}, secret="http://fixture-alt.invalid:8080")
+    save_route(store, "Loomy", RouteInput(mode="fixed", proxy_id=node))
+    store.bind_proxy(override, alternate)
+    before_failure = store.acquire(token, "model", conversation="sticky")
+    assert before_failure["account_id"] == preferred
+    store.end_request(before_failure["id"], "cancelled")
+
+    # An observation on another platform and a permission response are not
+    # connection holds on this platform, even when the node ID is shared.
+    another_platform = store.create_account("Marvis", "other", "other")
+    hold_connection(store, another_platform, primary)
+    record_proxy_result(store, preferred, primary, success=False, code="unknown_403", failure_phase="http_status")
+    still_eligible = store.acquire(token, "model", conversation="sticky")
+    assert still_eligible["account_id"] == preferred
+    store.end_request(still_eligible["id"], "cancelled")
+
+    hold_connection(store, preferred, primary)
+    during = store.acquire(token, "model", conversation="sticky")
+    assert during["account_id"] == override
+    store.end_request(during["id"], "cancelled")
+    with pytest.raises(DomainError, match="proxy_unavailable"):
+        store.acquire(token, "model", excluded=(override,))
+
+    if recovered_by == "retry_deadline":
+        t += 30
+    else:
+        store.resource_put("proxy", "primary", {"status": "untested"}, secret="http://fixture-new.invalid:8080",
+                           resource_id=node, expected_version=1)
+    recovered = store.acquire(token, "model", conversation="new-conversation")
+    assert recovered["account_id"] == preferred
+    store.end_request(recovered["id"], "cancelled")
 
 
 @pytest.mark.parametrize("phase", ["connect", "proxy_connect"])

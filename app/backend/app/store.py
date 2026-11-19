@@ -1079,9 +1079,17 @@ class Store:
                 ordinary = ordinary.where(Account.id != preferred.id)
             from .dispatch_policy import ordering
             candidates = chain([preferred] if preferred else (), s.scalars(ordinary.order_by(*ordering(s, key.platform)).execution_options(yield_per=64)))
-            temporarily_busy = False
+            from .proxy_pool import held_forwarding_accounts
+            held_exits = held_forwarding_accounts(s, key.platform, now) if model != "sandbox-echo" else set()
+            temporarily_busy = fixed_exit_unavailable = False
             for a in candidates:
                 if a.id in excluded:
+                    continue
+                if a.id in held_exits:
+                    # Skip before locking an account or recording an attempt. The
+                    # gateway still resolves the route at send time for changes
+                    # or failures that occur after this admission snapshot.
+                    fixed_exit_unavailable |= self.reason(a, busy, blocked, resolved_model) in {"ready", "busy"}
                     continue
                 # Different API keys can target the same account. Count after
                 # locking its current row, never use the pre-lock pool snapshot.
@@ -1126,6 +1134,8 @@ class Store:
                 failure = DomainError('account_concurrency_busy', 503)
                 failure.queue_wait_seconds = dispatch['queue_wait_seconds']
                 raise failure
+            if fixed_exit_unavailable and not request_id:
+                raise DomainError("proxy_unavailable", 503)
             raise DomainError("no_available_account", 503)
 
     def expire_request_leases(self, limit=100):
